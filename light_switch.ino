@@ -10,10 +10,17 @@
 #define COMMAND_LED_ON LOW
 #define COMMAND_LED_OFF HIGH
 #define BUTTON_PIN 12
+#define LONG_PRESS_DELAY 200
+#define DOUBLE_PRESS_DELAY 500
 
 struct SocketAddr {
   IPAddress ip;
   int port;
+};
+
+enum ButtonPress {
+  BUTTON_PRESS_SHORT,
+  BUTTON_PRESS_LONG
 };
 
 WiFiUDP udp;
@@ -112,7 +119,7 @@ SocketAddr discover() {
   }
 }
 
-void sendToggleCommand(SocketAddr address) {
+void sendTogglePowerCommand(SocketAddr address) {
   WiFiClient client;
   client.connect(address.ip, address.port);
 
@@ -122,12 +129,62 @@ void sendToggleCommand(SocketAddr address) {
   client.stop();
 }
 
-void loop() {
-  digitalWrite(COMMAND_LED, COMMAND_LED_OFF);
+std::optional<int> readBrightnessResponse(char *response) {
+  char *ptr = response;
 
-  // Debounce
-  for (int i = 0; i < 50; i++) {
-    delay(10);
+  // Find result field
+  ptr = strstr(ptr, "\"result\":");
+  if (!ptr) return std::nullopt;
+  ptr += 9;
+
+  // Find beginning of result array
+  ptr = strstr(ptr, "[");
+  if (!ptr) return std::nullopt;
+  ptr++;
+
+  // Find result string
+  ptr = strstr(ptr, "\"");
+  if (!ptr) return std::nullopt;
+  ptr++;
+
+  // Parse brightness
+  int brightness = atoi(ptr);
+  if (!brightness) return std::nullopt;
+
+  return brightness;
+}
+
+void sendToggleBrightnessCommand(SocketAddr address) {
+  WiFiClient client;
+  client.connect(address.ip, address.port);
+  client.setTimeout(1000);
+
+  client.write("{\"id\": 1, \"method\": \"get_prop\", \"params\": [\"bright\"]}\r\n");
+  client.flush();
+
+  char response[32] = {0};
+  size_t length = client.readBytesUntil('\n', response, (sizeof response) - 1);
+  if (auto brightness = readBrightnessResponse(response)) {
+    client.write("{\"id\": 2, \"method\": \"set_bright\", \"params\": [");
+    if (brightness < 50) {
+      client.write("100");
+    } else {
+      client.write("1");
+    }
+    client.write(", \"smooth\", 500]}\r\n");
+    client.flush();
+  } else {
+    Serial.print("Failed to parse brightness response: ");
+    Serial.println(response);
+  }
+
+  client.stop();
+}
+
+ButtonPress readButtonPress() {
+  // Ignore double presses
+  for (int i = 0; i < DOUBLE_PRESS_DELAY; i++) {
+    delay(1);
     if (!digitalRead(BUTTON_PIN)) {
       i = 0;
     }
@@ -139,6 +196,24 @@ void loop() {
     delay(10);
   }
 
+  // Debounce
+  delay(10);
+
+  for (int i = 0; i < LONG_PRESS_DELAY; i++) {
+    delay(1);
+    if (digitalRead(BUTTON_PIN)) {
+      return BUTTON_PRESS_SHORT;
+    }
+  }
+
+  return BUTTON_PRESS_LONG;
+}
+
+void loop() {
+  digitalWrite(COMMAND_LED, COMMAND_LED_OFF);
+
+  ButtonPress buttonPress = readButtonPress();
+
   digitalWrite(COMMAND_LED, COMMAND_LED_ON);
 
   Serial.println("Discovering...");
@@ -148,7 +223,12 @@ void loop() {
   Serial.print(":");
   Serial.println(address.port);
 
-  Serial.println("Sending toggle command...");
-  sendToggleCommand(address);
+  if (buttonPress == BUTTON_PRESS_SHORT) {
+    Serial.println("Sending toggle power command...");
+    sendTogglePowerCommand(address);
+  } else {
+    Serial.println("Sending toggle brightness command...");
+    sendToggleBrightnessCommand(address);
+  }
   Serial.println("Sent");
 }
