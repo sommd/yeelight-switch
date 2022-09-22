@@ -11,7 +11,7 @@
 #define COMMAND_LED_OFF HIGH
 #define BUTTON_PIN 12
 #define LONG_PRESS_DELAY 200
-#define DOUBLE_PRESS_DELAY 500
+#define DOUBLE_PRESS_DELAY 200
 
 struct SocketAddr {
   IPAddress ip;
