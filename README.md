@@ -13,4 +13,14 @@ Create a `config.h` file with:
 #define WIFI_PASSWD "wifi password"
 ```
 
-Button should be connected to pin 12 ground.
+Button should be connected to pin 12 and ground.
+
+## Usage
+
+When light is off:
+- Short press to turn on at minimum brightness.
+- Long press to turn on at maximum brightness.
+
+When light is on:
+- Short press to turn off.
+- Long press to toggle minimum/maximum brightness.

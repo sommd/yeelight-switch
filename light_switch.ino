@@ -141,7 +141,7 @@ std::optional<ButtonPress> readButtonPress() {
   if (waitForButtonPress()) {
     // Debounce
     delay(DEBOUNCE_DELAY);
-    
+
     // Determine if long press
     for (int i = 0; i < LONG_PRESS_DELAY; i++) {
       delay(1);
@@ -175,7 +175,7 @@ std::optional<String> readCommandResponse(WiFiClient &client) {
   }
 }
 
-std::optional<String> command(WiFiClient &client, const char *method, const char *params) {
+void sendCommand(WiFiClient &client, const char *method, const char *params) {
   commandId++;
 
   String command = "{\"id\":";
@@ -191,7 +191,15 @@ std::optional<String> command(WiFiClient &client, const char *method, const char
 
   client.print(command);
   client.write("\r\n");
+}
+
+void flushCommands(WiFiClient &client) {
   client.flush();
+}
+
+std::optional<String> command(WiFiClient &client, const char *method, const char *params) {
+  sendCommand(client, method, params);
+  flushCommands(client);
 
   if (auto response = readCommandResponse(client)) {
     Serial.print("Received response: ");
@@ -205,8 +213,43 @@ std::optional<String> command(WiFiClient &client, const char *method, const char
   }
 }
 
-void sendTogglePowerCommand(WiFiClient &client) {
-  command(client, "toggle", "");
+std::optional<bool> parsePowerResponse(String &response) {
+  const char *ptr = response.c_str();
+
+  // Find result field
+  ptr = strstr(ptr, "\"result\":");
+  if (!ptr) return std::nullopt;
+  ptr += 9;
+
+  // Find beginning of result array
+  ptr = strstr(ptr, "[");
+  if (!ptr) return std::nullopt;
+  ptr++;
+
+  // Find result string
+  ptr = strstr(ptr, "\"");
+  if (!ptr) return std::nullopt;
+
+  // Parse power
+  if (strncmp(ptr, "\"on\"", 4) == 0) {
+    return true;
+  } else if (strncmp(ptr, "\"off\"", 5) == 0) {
+    return false;
+  } else {
+    return std::nullopt;
+  }
+}
+
+std::optional<bool> getPower(WiFiClient &client) {
+  if (auto response = command(client, "get_prop", "\"power\"")) {
+    if (auto power = parsePowerResponse(*response)) {
+      return power;
+    } else {
+      Serial.println("Failed to parse power response");
+    }
+  } else {
+    Serial.println("Failed to get power");
+  }
 }
 
 std::optional<int> parseBrightnessResponse(String &response) {
@@ -234,16 +277,35 @@ std::optional<int> parseBrightnessResponse(String &response) {
   return brightness;
 }
 
-void sendToggleBrightnessCommand(WiFiClient &client) {
+std::optional<int> getBrightness(WiFiClient &client) {
   if (auto response = command(client, "get_prop", "\"bright\"")) {
     if (auto brightness = parseBrightnessResponse(*response)) {
-      command(client, "set_bright", brightness < 50 ? "100, \"smooth\", 500" : "1, \"smooth\", 500");
+      return brightness;
     } else {
-      Serial.print("Failed to parse brightness response: ");
-      Serial.println(*response);
+      Serial.println("Failed to parse brightness response");
     }
   } else {
     Serial.println("Failed to get brightness");
+  }
+
+  return std::nullopt;
+}
+
+void sendTogglePowerCommand(WiFiClient &client) {
+  if (!getPower(client).value_or(true)) {
+    sendCommand(client, "set_power", "\"on\", \"smooth\", 500");
+    command(client, "set_bright", "1, \"smooth\", 500");
+  } else {
+    command(client, "toggle", "");
+  }
+}
+
+void sendToggleBrightnessCommand(WiFiClient &client) {
+  if (!getPower(client).value_or(true)) {
+    sendCommand(client, "set_power", "\"on\", \"smooth\", 500");
+    command(client, "set_bright", "100, \"smooth\", 500");
+  } else if (auto brightness = getBrightness(client)) {
+    command(client, "set_bright", brightness < 50 ? "100, \"smooth\", 500" : "1, \"smooth\", 500");
   }
 }
 
