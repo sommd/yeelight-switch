@@ -6,12 +6,13 @@
 #define WIFI_LED 2
 #define WIFI_LED_ON LOW
 #define WIFI_LED_OFF HIGH
-#define COMMAND_LED 0
-#define COMMAND_LED_ON LOW
-#define COMMAND_LED_OFF HIGH
+#define STATUS_LED 0
+#define STATUS_LED_ON LOW
+#define STATUS_LED_OFF HIGH
 #define BUTTON_PIN 12
+#define BUTTON_PRESSED 0
+#define DEBOUNCE_DELAY 10
 #define LONG_PRESS_DELAY 200
-#define DOUBLE_PRESS_DELAY 200
 
 struct SocketAddr {
   IPAddress ip;
@@ -25,6 +26,7 @@ enum ButtonPress {
 
 WiFiUDP udp;
 char discoveryResponse[4096];
+unsigned int commandId = 0;
 
 void connectToWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWD);
@@ -36,8 +38,8 @@ void connectToWiFi() {
 void setup() {
   pinMode(WIFI_LED, OUTPUT);
   digitalWrite(WIFI_LED, WIFI_LED_OFF);
-  pinMode(COMMAND_LED, OUTPUT);
-  digitalWrite(COMMAND_LED, COMMAND_LED_OFF);
+  pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(STATUS_LED, STATUS_LED_OFF);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   Serial.begin(115200);
@@ -119,18 +121,96 @@ SocketAddr discover() {
   }
 }
 
-void sendTogglePowerCommand(SocketAddr address) {
-  WiFiClient client;
-  client.connect(address.ip, address.port);
+bool waitForButtonPress() {
+  for (int i = 0; i < 10; i++) {
+    delay(1);
+    if (digitalRead(BUTTON_PIN) == BUTTON_PRESSED) {
+      return true;
+    }
+  }
 
-  client.write("{\"id\": 1, \"method\": \"toggle\", \"params\": []}\r\n");
-  client.flush();
-
-  client.stop();
+  return false;
 }
 
-std::optional<int> readBrightnessResponse(char *response) {
-  char *ptr = response;
+std::optional<ButtonPress> readButtonPress() {
+  // Wait until button not pressed
+  while (digitalRead(BUTTON_PIN) == BUTTON_PRESSED) {
+    delay(1);
+  }
+
+  if (waitForButtonPress()) {
+    // Debounce
+    delay(DEBOUNCE_DELAY);
+    
+    // Determine if long press
+    for (int i = 0; i < LONG_PRESS_DELAY; i++) {
+      delay(1);
+      if (digitalRead(BUTTON_PIN) != BUTTON_PRESSED) {
+        return BUTTON_PRESS_SHORT;
+      }
+    }
+
+    return BUTTON_PRESS_LONG;
+  } else {
+    return std::nullopt;
+  }
+}
+
+std::optional<String> readCommandResponse(WiFiClient &client) {
+  String expectedPrefix = "{\"id\":";
+  expectedPrefix += commandId;
+  expectedPrefix += ",";
+
+  while (true) {
+    String response = client.readStringUntil('\n');
+
+    if (response.startsWith(expectedPrefix)) {
+      return response;
+    } else if (response == "") {
+      return std::nullopt;
+    } else {
+      Serial.print("Ignoring response: ");
+      Serial.println(response);
+    }
+  }
+}
+
+std::optional<String> command(WiFiClient &client, const char *method, const char *params) {
+  commandId++;
+
+  String command = "{\"id\":";
+  command += commandId;
+  command += ",\"method\":\"";
+  command += method;
+  command += "\",\"params\":[";
+  command += params;
+  command += "]}";
+
+  Serial.print("Sending command: ");
+  Serial.println(command);
+
+  client.print(command);
+  client.write("\r\n");
+  client.flush();
+
+  if (auto response = readCommandResponse(client)) {
+    Serial.print("Received response: ");
+    Serial.println(*response);
+
+    return response;
+  } else {
+    Serial.println("Received no response");
+
+    return std::nullopt;
+  }
+}
+
+void sendTogglePowerCommand(WiFiClient &client) {
+  command(client, "toggle", "");
+}
+
+std::optional<int> parseBrightnessResponse(String &response) {
+  const char *ptr = response.c_str();
 
   // Find result field
   ptr = strstr(ptr, "\"result\":");
@@ -154,67 +234,21 @@ std::optional<int> readBrightnessResponse(char *response) {
   return brightness;
 }
 
-void sendToggleBrightnessCommand(SocketAddr address) {
-  WiFiClient client;
-  client.connect(address.ip, address.port);
-  client.setTimeout(1000);
-
-  client.write("{\"id\": 1, \"method\": \"get_prop\", \"params\": [\"bright\"]}\r\n");
-  client.flush();
-
-  char response[32] = {0};
-  size_t length = client.readBytesUntil('\n', response, (sizeof response) - 1);
-  if (auto brightness = readBrightnessResponse(response)) {
-    client.write("{\"id\": 2, \"method\": \"set_bright\", \"params\": [");
-    if (brightness < 50) {
-      client.write("100");
+void sendToggleBrightnessCommand(WiFiClient &client) {
+  if (auto response = command(client, "get_prop", "\"bright\"")) {
+    if (auto brightness = parseBrightnessResponse(*response)) {
+      command(client, "set_bright", brightness < 50 ? "100, \"smooth\", 500" : "1, \"smooth\", 500");
     } else {
-      client.write("1");
+      Serial.print("Failed to parse brightness response: ");
+      Serial.println(*response);
     }
-    client.write(", \"smooth\", 500]}\r\n");
-    client.flush();
   } else {
-    Serial.print("Failed to parse brightness response: ");
-    Serial.println(response);
+    Serial.println("Failed to get brightness");
   }
-
-  client.stop();
-}
-
-ButtonPress readButtonPress() {
-  // Ignore double presses
-  for (int i = 0; i < DOUBLE_PRESS_DELAY; i++) {
-    delay(1);
-    if (!digitalRead(BUTTON_PIN)) {
-      i = 0;
-    }
-  }
-
-  while (true) {
-    if (!digitalRead(BUTTON_PIN)) break;
-    if (WiFi.status() != WL_CONNECTED) ESP.restart();
-    delay(10);
-  }
-
-  // Debounce
-  delay(10);
-
-  for (int i = 0; i < LONG_PRESS_DELAY; i++) {
-    delay(1);
-    if (digitalRead(BUTTON_PIN)) {
-      return BUTTON_PRESS_SHORT;
-    }
-  }
-
-  return BUTTON_PRESS_LONG;
 }
 
 void loop() {
-  digitalWrite(COMMAND_LED, COMMAND_LED_OFF);
-
-  ButtonPress buttonPress = readButtonPress();
-
-  digitalWrite(COMMAND_LED, COMMAND_LED_ON);
+  digitalWrite(STATUS_LED, STATUS_LED_ON);
 
   Serial.println("Discovering...");
   SocketAddr address = discover();
@@ -223,12 +257,36 @@ void loop() {
   Serial.print(":");
   Serial.println(address.port);
 
-  if (buttonPress == BUTTON_PRESS_SHORT) {
-    Serial.println("Sending toggle power command...");
-    sendTogglePowerCommand(address);
+  Serial.println("Connecting...");
+  WiFiClient client;
+  if (client.connect(address.ip, address.port)) {
+    client.setTimeout(1000);
+    Serial.println("Connected");
   } else {
-    Serial.println("Sending toggle brightness command...");
-    sendToggleBrightnessCommand(address);
+    Serial.println("Failed to connect");
+    return; // Rediscover and reconnect
   }
-  Serial.println("Sent");
+
+  digitalWrite(STATUS_LED, STATUS_LED_OFF);
+
+  while (true) {
+    if (!client.connected()) {
+      return; // Rediscover and reconnect
+    } else if (WiFi.status() != WL_CONNECTED) {
+      ESP.restart(); // Restart and reconnect to WiFi
+    } else if (auto buttonPress = readButtonPress()) {
+      digitalWrite(STATUS_LED, STATUS_LED_ON);
+
+      if (buttonPress == BUTTON_PRESS_SHORT) {
+        Serial.println("Sending toggle power command...");
+        sendTogglePowerCommand(client);
+      } else {
+        Serial.println("Sending toggle brightness command...");
+        sendToggleBrightnessCommand(client);
+      }
+      Serial.println("Sent");
+
+      digitalWrite(STATUS_LED, STATUS_LED_OFF);
+    }
+  }
 }
